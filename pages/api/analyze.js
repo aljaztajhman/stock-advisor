@@ -3,13 +3,11 @@
 function scoreValuation(pe, horizon) {
   if (pe == null || pe <= 0) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   let points, verdict, sentiment;
-
   if (pe < 10)       { points = 20; verdict = "Very cheap";     sentiment = "positive"; }
   else if (pe < 15)  { points = 17; verdict = "Attractive";     sentiment = "positive"; }
   else if (pe < 25)  { points = 13; verdict = "Fair";           sentiment = "neutral";  }
   else if (pe < 40)  { points = 8;  verdict = "Pricey";         sentiment = "negative"; }
   else               { points = 3;  verdict = "Very expensive";  sentiment = "negative"; }
-
   if (horizon === "long" && pe < 30) points = Math.min(20, points + 2);
   return { points, maxPoints: 20, verdict, sentiment };
 }
@@ -17,14 +15,12 @@ function scoreValuation(pe, horizon) {
 function scoreGrowth(earningsGrowth, revenueGrowth) {
   const growth = earningsGrowth ?? revenueGrowth;
   if (growth == null) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
-
   let points, verdict, sentiment;
   if (growth > 0.5)       { points = 20; verdict = "Explosive"; sentiment = "positive"; }
   else if (growth > 0.2)  { points = 17; verdict = "Strong";    sentiment = "positive"; }
   else if (growth > 0.08) { points = 12; verdict = "Decent";    sentiment = "neutral";  }
   else if (growth > 0)    { points = 7;  verdict = "Slow";      sentiment = "negative"; }
   else                    { points = 2;  verdict = "Declining";  sentiment = "negative"; }
-
   return { points, maxPoints: 20, verdict, sentiment };
 }
 
@@ -33,7 +29,6 @@ function scoreMomentum(currentPrice, low52, high52, horizon) {
     return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   }
   const pos = (currentPrice - low52) / (high52 - low52);
-
   let points, verdict, sentiment;
   if (horizon === "short") {
     if (pos > 0.85)     { points = 20; verdict = "Near high";    sentiment = "positive"; }
@@ -54,7 +49,6 @@ function scoreMomentum(currentPrice, low52, high52, horizon) {
 function scoreRisk(beta, risk) {
   if (beta == null) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   let points, verdict, sentiment;
-
   if (risk === "low") {
     if (beta < 0.5)      { points = 20; verdict = "Very stable";  sentiment = "positive"; }
     else if (beta < 0.8) { points = 16; verdict = "Stable";       sentiment = "positive"; }
@@ -78,14 +72,12 @@ function scoreRisk(beta, risk) {
 function scoreProfitability(margin, horizon) {
   if (margin == null) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   let points, verdict, sentiment;
-
   if (margin > 0.35)      { points = 20; verdict = "Exceptional"; sentiment = "positive"; }
   else if (margin > 0.2)  { points = 16; verdict = "Strong";      sentiment = "positive"; }
   else if (margin > 0.08) { points = 12; verdict = "Good";        sentiment = "neutral";  }
   else if (margin > 0.02) { points = 7;  verdict = "Thin";        sentiment = "negative"; }
   else if (margin >= 0)   { points = 3;  verdict = "Break-even";  sentiment = "negative"; }
   else                    { points = 0;  verdict = "Unprofitable"; sentiment = "negative"; }
-
   if (horizon === "long" && margin > 0.2) points = Math.min(20, points + 2);
   return { points, maxPoints: 20, verdict, sentiment };
 }
@@ -97,39 +89,55 @@ function computeScore(factors) {
   return Math.max(1, Math.min(5, Math.round((total / max) * 4 + 1)));
 }
 
-// ─── Format helpers ───────────────────────────────────────────────────────────
-
 function fmt(val, type) {
   if (val == null) return null;
   if (type === "pct")   return `${(val * 100).toFixed(1)}%`;
-  if (type === "x")     return `${val.toFixed(2)}x`;
-  if (type === "num")   return val.toFixed(2);
   if (type === "bn")    return `$${(val / 1e9).toFixed(2)}B`;
   if (type === "price") return `$${val.toFixed(2)}`;
   return String(val);
 }
 
-// ─── Yahoo Finance direct fetch (bypasses cloud IP blocks) ───────────────────
+// ─── Alpha Vantage data fetch ─────────────────────────────────────────────────
 
-const YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Referer": "https://finance.yahoo.com/",
-  "Origin": "https://finance.yahoo.com",
-};
+async function fetchStockData(ticker, apiKey) {
+  const base = "https://www.alphavantage.co/query";
 
-async function fetchYahooSummary(ticker) {
-  const modules = "financialData,defaultKeyStatistics,summaryDetail,price";
-  const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}&corsDomain=finance.yahoo.com`;
+  const [overviewRes, quoteRes] = await Promise.all([
+    fetch(`${base}?function=OVERVIEW&symbol=${ticker}&apikey=${apiKey}`),
+    fetch(`${base}?function=GLOBAL_QUOTE&symbol=${ticker}&apikey=${apiKey}`),
+  ]);
 
-  const res = await fetch(url, { headers: YF_HEADERS });
-  if (!res.ok) throw new Error(`Yahoo Finance returned ${res.status}`);
+  if (!overviewRes.ok || !quoteRes.ok) throw new Error("Request failed");
 
-  const json = await res.json();
-  const result = json?.quoteSummary?.result?.[0];
-  if (!result) throw new Error("No data returned");
-  return result;
+  const [overview, quoteData] = await Promise.all([
+    overviewRes.json(),
+    quoteRes.json(),
+  ]);
+
+  // Rate limit hit
+  if (overview.Note || overview.Information) {
+    throw new Error("RATE_LIMIT");
+  }
+
+  // Ticker not found
+  if (!overview.Symbol) throw new Error("NOT_FOUND");
+
+  const q = quoteData["Global Quote"] || {};
+  const n = (v) => { const f = parseFloat(v); return isNaN(f) ? null : f; };
+
+  return {
+    name:           overview.Name,
+    currentPrice:   n(q["05. price"]),
+    marketCap:      n(overview.MarketCapitalization),
+    pe:             n(overview.PERatio),
+    earningsGrowth: n(overview.QuarterlyEarningsGrowthYOY),
+    revenueGrowth:  n(overview.QuarterlyRevenueGrowthYOY),
+    margin:         n(overview.ProfitMargin),
+    beta:           n(overview.Beta),
+    high52:         n(overview["52WeekHigh"]),
+    low52:          n(overview["52WeekLow"]),
+    dividendYield:  n(overview.DividendYield),
+  };
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -140,35 +148,28 @@ export default async function handler(req, res) {
   const { ticker, horizon = "long", risk = "medium" } = req.body;
   if (!ticker) return res.status(400).json({ error: "Ticker is required" });
 
-  // 1. Fetch Yahoo Finance data ------------------------------------------------
-  let data;
+  const avKey = process.env.ALPHA_VANTAGE_KEY;
+  if (!avKey) {
+    return res.status(500).json({
+      error: "ALPHA_VANTAGE_KEY is not set. Add it in your Vercel environment variables.",
+    });
+  }
+
+  // 1. Fetch stock data --------------------------------------------------------
+  let stock;
   try {
-    data = await fetchYahooSummary(ticker.toUpperCase());
+    stock = await fetchStockData(ticker.toUpperCase(), avKey);
   } catch (err) {
+    if (err.message === "RATE_LIMIT") {
+      return res.status(429).json({ error: "API rate limit reached. Alpha Vantage free tier allows 25 requests/day. Try again tomorrow or upgrade your key." });
+    }
     return res.status(404).json({
       error: `Could not find data for "${ticker}". Check the ticker symbol and try again.`,
     });
   }
 
-  const fd = data.financialData        || {};
-  const ks = data.defaultKeyStatistics || {};
-  const sd = data.summaryDetail        || {};
-  const pr = data.price                || {};
-
-  // Extract values — Yahoo Finance wraps numbers in { raw, fmt } objects
-  const r = (obj, key) => obj?.[key]?.raw ?? obj?.[key] ?? null;
-
-  const currentPrice   = r(pr, "regularMarketPrice");
-  const marketCap      = r(pr, "marketCap");
-  const companyName    = pr.longName ?? pr.shortName ?? ticker;
-  const pe             = r(sd, "trailingPE")   ?? r(ks, "trailingEps") ?? null;
-  const earningsGrowth = r(fd, "earningsGrowth");
-  const revenueGrowth  = r(fd, "revenueGrowth");
-  const margin         = r(fd, "profitMargins");
-  const beta           = r(sd, "beta")         ?? r(ks, "beta3Year") ?? null;
-  const low52          = r(sd, "fiftyTwoWeekLow")  ?? r(pr, "fiftyTwoWeekLow");
-  const high52         = r(sd, "fiftyTwoWeekHigh") ?? r(pr, "fiftyTwoWeekHigh");
-  const dividendYield  = r(sd, "dividendYield");
+  const { name, currentPrice, marketCap, pe, earningsGrowth, revenueGrowth,
+          margin, beta, high52, low52, dividendYield } = stock;
 
   // 2. Compute factor scores ---------------------------------------------------
   const rawFactors = [
@@ -194,7 +195,7 @@ export default async function handler(req, res) {
   // 3. Build context for AI explanation ----------------------------------------
   const dataContext = [
     `Ticker: ${ticker}`,
-    `Company: ${companyName}`,
+    `Company: ${name}`,
     `Current price: ${fmt(currentPrice, "price")}`,
     `52-week range: ${fmt(low52, "price")} – ${fmt(high52, "price")}`,
     `Market cap: ${fmt(marketCap, "bn")}`,
@@ -223,24 +224,20 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 350,
-          messages: [
-            {
-              role: "user",
-              content: `You are a concise financial analyst. Based on the following stock data, write a 3–5 sentence plain-English explanation of why this stock received a score of ${score}/5 for the given investor profile. Be direct and mention specific numbers. Do not use markdown or bullet points.\n\n${dataContext}`,
-            },
-          ],
+          messages: [{
+            role: "user",
+            content: `You are a concise financial analyst. Based on the following stock data, write a 3–5 sentence plain-English explanation of why this stock received a score of ${score}/5 for the given investor profile. Be direct and mention specific numbers. Do not use markdown or bullet points.\n\n${dataContext}`,
+          }],
         }),
       });
       if (response.ok) {
         const json = await response.json();
         aiExplanation = json.content?.[0]?.text?.trim() ?? null;
       }
-    } catch (_) {
-      // AI explanation is optional — don't fail the whole request
-    }
+    } catch (_) { /* optional */ }
   }
 
-  // 5. Build metrics rows for display ------------------------------------------
+  // 5. Build metrics rows ------------------------------------------------------
   const metrics = [
     { label: "Current Price",   value: fmt(currentPrice, "price") },
     { label: "52-Week Low",     value: fmt(low52, "price") },
@@ -262,14 +259,5 @@ export default async function handler(req, res) {
     { label: "Dividend Yield",  value: fmt(dividendYield, "pct") },
   ].filter((m) => m.value != null);
 
-  // 6. Return ------------------------------------------------------------------
-  return res.status(200).json({
-    ticker,
-    name: companyName,
-    score,
-    currentPrice,
-    factors: rawFactors,
-    metrics,
-    aiExplanation,
-  });
+  return res.status(200).json({ ticker, name, score, currentPrice, factors: rawFactors, metrics, aiExplanation });
 }
