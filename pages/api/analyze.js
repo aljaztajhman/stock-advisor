@@ -3,11 +3,11 @@
 function scoreValuation(pe, horizon) {
   if (pe == null || pe <= 0) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   let points, verdict, sentiment;
-  if (pe < 10)       { points = 20; verdict = "Very cheap";     sentiment = "positive"; }
-  else if (pe < 15)  { points = 17; verdict = "Attractive";     sentiment = "positive"; }
-  else if (pe < 25)  { points = 13; verdict = "Fair";           sentiment = "neutral";  }
-  else if (pe < 40)  { points = 8;  verdict = "Pricey";         sentiment = "negative"; }
-  else               { points = 3;  verdict = "Very expensive";  sentiment = "negative"; }
+  if (pe < 10)       { points = 20; verdict = "Very cheap";    sentiment = "positive"; }
+  else if (pe < 15)  { points = 17; verdict = "Attractive";    sentiment = "positive"; }
+  else if (pe < 25)  { points = 13; verdict = "Fair";          sentiment = "neutral";  }
+  else if (pe < 40)  { points = 8;  verdict = "Pricey";        sentiment = "negative"; }
+  else               { points = 3;  verdict = "Very expensive"; sentiment = "negative"; }
   if (horizon === "long" && pe < 30) points = Math.min(20, points + 2);
   return { points, maxPoints: 20, verdict, sentiment };
 }
@@ -93,50 +93,55 @@ function fmt(val, type) {
   if (val == null) return null;
   if (type === "pct")   return `${(val * 100).toFixed(1)}%`;
   if (type === "bn")    return `$${(val / 1e9).toFixed(2)}B`;
-  if (type === "price") return `$${val.toFixed(2)}`;
+  if (type === "price") return `$${parseFloat(val).toFixed(2)}`;
   return String(val);
 }
 
-// ─── Alpha Vantage data fetch ─────────────────────────────────────────────────
+// ─── Twelve Data fetch ────────────────────────────────────────────────────────
 
 async function fetchStockData(ticker, apiKey) {
-  const base = "https://www.alphavantage.co/query";
+  const base = "https://api.twelvedata.com";
 
-  const [overviewRes, quoteRes] = await Promise.all([
-    fetch(`${base}?function=OVERVIEW&symbol=${ticker}&apikey=${apiKey}`),
-    fetch(`${base}?function=GLOBAL_QUOTE&symbol=${ticker}&apikey=${apiKey}`),
+  const [quoteRes, statsRes] = await Promise.all([
+    fetch(`${base}/quote?symbol=${ticker}&apikey=${apiKey}`),
+    fetch(`${base}/statistics?symbol=${ticker}&apikey=${apiKey}`),
   ]);
 
-  if (!overviewRes.ok || !quoteRes.ok) throw new Error("Request failed");
+  if (!quoteRes.ok) throw new Error("Request failed");
 
-  const [overview, quoteData] = await Promise.all([
-    overviewRes.json(),
+  const [quote, statsData] = await Promise.all([
     quoteRes.json(),
+    statsRes.ok ? statsRes.json() : Promise.resolve({}),
   ]);
 
-  // Rate limit hit
-  if (overview.Note || overview.Information) {
-    throw new Error("RATE_LIMIT");
+  // Ticker not found or API error
+  if (quote.status === "error" || quote.code === 400 || quote.code === 404) {
+    throw new Error("NOT_FOUND");
   }
+  // Rate limit
+  if (quote.code === 429) throw new Error("RATE_LIMIT");
 
-  // Ticker not found
-  if (!overview.Symbol) throw new Error("NOT_FOUND");
+  const n = (v) => { const f = parseFloat(v); return isNaN(f) || f === 0 ? null : f; };
 
-  const q = quoteData["Global Quote"] || {};
-  const n = (v) => { const f = parseFloat(v); return isNaN(f) ? null : f; };
+  const stats   = statsData?.statistics         || {};
+  const vm      = stats.valuations_metrics      || {};
+  const fin     = stats.financials              || {};
+  const income  = fin.income_statement          || {};
+  const divs    = stats.dividends_and_splits    || {};
+  const w52     = quote.fifty_two_week          || {};
 
   return {
-    name:           overview.Name,
-    currentPrice:   n(q["05. price"]),
-    marketCap:      n(overview.MarketCapitalization),
-    pe:             n(overview.PERatio),
-    earningsGrowth: n(overview.QuarterlyEarningsGrowthYOY),
-    revenueGrowth:  n(overview.QuarterlyRevenueGrowthYOY),
-    margin:         n(overview.ProfitMargin),
-    beta:           n(overview.Beta),
-    high52:         n(overview["52WeekHigh"]),
-    low52:          n(overview["52WeekLow"]),
-    dividendYield:  n(overview.DividendYield),
+    name:           quote.name ?? ticker,
+    currentPrice:   n(quote.close),
+    marketCap:      null, // calculated below if possible
+    pe:             n(vm.trailing_pe),
+    earningsGrowth: n(income.quarterly_earnings_growth_yoy),
+    revenueGrowth:  n(income.quarterly_revenue_growth_yoy),
+    margin:         n(fin.profit_margin),
+    beta:           n(vm.beta) ?? n(stats.beta),
+    high52:         n(w52.high),
+    low52:          n(w52.low),
+    dividendYield:  n(divs.trailing_annual_dividend_yield),
   };
 }
 
@@ -148,27 +153,27 @@ export default async function handler(req, res) {
   const { ticker, horizon = "long", risk = "medium" } = req.body;
   if (!ticker) return res.status(400).json({ error: "Ticker is required" });
 
-  const avKey = process.env.ALPHA_VANTAGE_KEY;
-  if (!avKey) {
+  const tdKey = process.env.TWELVE_DATA_KEY;
+  if (!tdKey) {
     return res.status(500).json({
-      error: "ALPHA_VANTAGE_KEY is not set. Add it in your Vercel environment variables.",
+      error: "TWELVE_DATA_KEY is not set. Add it in your Vercel environment variables.",
     });
   }
 
   // 1. Fetch stock data --------------------------------------------------------
   let stock;
   try {
-    stock = await fetchStockData(ticker.toUpperCase(), avKey);
+    stock = await fetchStockData(ticker.toUpperCase(), tdKey);
   } catch (err) {
     if (err.message === "RATE_LIMIT") {
-      return res.status(429).json({ error: "API rate limit reached. Alpha Vantage free tier allows 25 requests/day. Try again tomorrow or upgrade your key." });
+      return res.status(429).json({ error: "Rate limit reached. Twelve Data free tier allows 8 requests/minute. Wait a moment and try again." });
     }
     return res.status(404).json({
       error: `Could not find data for "${ticker}". Check the ticker symbol and try again.`,
     });
   }
 
-  const { name, currentPrice, marketCap, pe, earningsGrowth, revenueGrowth,
+  const { name, currentPrice, pe, earningsGrowth, revenueGrowth,
           margin, beta, high52, low52, dividendYield } = stock;
 
   // 2. Compute factor scores ---------------------------------------------------
@@ -192,13 +197,12 @@ export default async function handler(req, res) {
 
   const score = computeScore(rawFactors);
 
-  // 3. Build context for AI explanation ----------------------------------------
+  // 3. Build AI context --------------------------------------------------------
   const dataContext = [
     `Ticker: ${ticker}`,
     `Company: ${name}`,
     `Current price: ${fmt(currentPrice, "price")}`,
     `52-week range: ${fmt(low52, "price")} – ${fmt(high52, "price")}`,
-    `Market cap: ${fmt(marketCap, "bn")}`,
     `Trailing P/E: ${pe != null ? pe.toFixed(2) : "N/A"}`,
     `Earnings growth (YoY): ${earningsGrowth != null ? fmt(earningsGrowth, "pct") : "N/A"}`,
     `Revenue growth (YoY): ${revenueGrowth != null ? fmt(revenueGrowth, "pct") : "N/A"}`,
@@ -210,11 +214,11 @@ export default async function handler(req, res) {
     `Rule-based score: ${score}/5`,
   ].join("\n");
 
-  // 4. Call Claude for explanation ----------------------------------------------
+  // 4. Claude explanation ------------------------------------------------------
   let aiExplanation = null;
   if (process.env.ANTHROPIC_API_KEY) {
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -230,19 +234,18 @@ export default async function handler(req, res) {
           }],
         }),
       });
-      if (response.ok) {
-        const json = await response.json();
-        aiExplanation = json.content?.[0]?.text?.trim() ?? null;
+      if (r.ok) {
+        const j = await r.json();
+        aiExplanation = j.content?.[0]?.text?.trim() ?? null;
       }
     } catch (_) { /* optional */ }
   }
 
-  // 5. Build metrics rows ------------------------------------------------------
+  // 5. Metrics for display -----------------------------------------------------
   const metrics = [
     { label: "Current Price",   value: fmt(currentPrice, "price") },
     { label: "52-Week Low",     value: fmt(low52, "price") },
     { label: "52-Week High",    value: fmt(high52, "price") },
-    { label: "Market Cap",      value: fmt(marketCap, "bn") },
     { label: "Trailing P/E",    value: pe != null ? pe.toFixed(2) : null,
       note: pe != null ? (pe < 15 ? "cheap" : pe > 35 ? "expensive" : "fair") : null,
       good: pe != null ? (pe < 15 ? true : pe > 35 ? false : null) : null },
