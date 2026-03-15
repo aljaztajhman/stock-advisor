@@ -1,20 +1,16 @@
-import yahooFinance from "yahoo-finance2";
-
 // ─── Scoring helpers ─────────────────────────────────────────────────────────
 
 function scoreValuation(pe, horizon) {
   if (pe == null || pe <= 0) return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   let points, verdict, sentiment;
 
-  if (pe < 10)       { points = 20; verdict = "Very cheap";    sentiment = "positive"; }
-  else if (pe < 15)  { points = 17; verdict = "Attractive";    sentiment = "positive"; }
-  else if (pe < 25)  { points = 13; verdict = "Fair";          sentiment = "neutral";  }
-  else if (pe < 40)  { points = 8;  verdict = "Pricey";        sentiment = "negative"; }
-  else               { points = 3;  verdict = "Very expensive"; sentiment = "negative"; }
+  if (pe < 10)       { points = 20; verdict = "Very cheap";     sentiment = "positive"; }
+  else if (pe < 15)  { points = 17; verdict = "Attractive";     sentiment = "positive"; }
+  else if (pe < 25)  { points = 13; verdict = "Fair";           sentiment = "neutral";  }
+  else if (pe < 40)  { points = 8;  verdict = "Pricey";         sentiment = "negative"; }
+  else               { points = 3;  verdict = "Very expensive";  sentiment = "negative"; }
 
-  // Long-term investors can tolerate slightly higher P/E for growth
   if (horizon === "long" && pe < 30) points = Math.min(20, points + 2);
-
   return { points, maxPoints: 20, verdict, sentiment };
 }
 
@@ -36,18 +32,16 @@ function scoreMomentum(currentPrice, low52, high52, horizon) {
   if (!currentPrice || !low52 || !high52 || high52 === low52) {
     return { points: 0, maxPoints: 20, verdict: "N/A", sentiment: "neutral" };
   }
-  const pos = (currentPrice - low52) / (high52 - low52); // 0..1
+  const pos = (currentPrice - low52) / (high52 - low52);
 
   let points, verdict, sentiment;
   if (horizon === "short") {
-    // Short-term: higher position = strong momentum
     if (pos > 0.85)     { points = 20; verdict = "Near high";    sentiment = "positive"; }
     else if (pos > 0.6) { points = 15; verdict = "Strong trend"; sentiment = "positive"; }
     else if (pos > 0.4) { points = 10; verdict = "Mid-range";    sentiment = "neutral";  }
     else if (pos > 0.2) { points = 6;  verdict = "Weak trend";   sentiment = "negative"; }
     else                { points = 3;  verdict = "Near low";      sentiment = "negative"; }
   } else {
-    // Long/medium term: lower position = potential buy at discount
     if (pos < 0.2)      { points = 20; verdict = "Deep discount"; sentiment = "positive"; }
     else if (pos < 0.4) { points = 16; verdict = "Undervalued";   sentiment = "positive"; }
     else if (pos < 0.65){ points = 11; verdict = "Mid-range";     sentiment = "neutral";  }
@@ -62,20 +56,20 @@ function scoreRisk(beta, risk) {
   let points, verdict, sentiment;
 
   if (risk === "low") {
-    if (beta < 0.5)      { points = 20; verdict = "Very stable"; sentiment = "positive"; }
-    else if (beta < 0.8) { points = 16; verdict = "Stable";      sentiment = "positive"; }
-    else if (beta < 1.2) { points = 10; verdict = "Average";     sentiment = "neutral";  }
-    else if (beta < 1.6) { points = 5;  verdict = "Volatile";    sentiment = "negative"; }
-    else                 { points = 2;  verdict = "High risk";    sentiment = "negative"; }
+    if (beta < 0.5)      { points = 20; verdict = "Very stable";  sentiment = "positive"; }
+    else if (beta < 0.8) { points = 16; verdict = "Stable";       sentiment = "positive"; }
+    else if (beta < 1.2) { points = 10; verdict = "Average";      sentiment = "neutral";  }
+    else if (beta < 1.6) { points = 5;  verdict = "Volatile";     sentiment = "negative"; }
+    else                 { points = 2;  verdict = "High risk";     sentiment = "negative"; }
   } else if (risk === "medium") {
     if (beta < 0.7)      { points = 13; verdict = "Conservative"; sentiment = "neutral";  }
     else if (beta < 1.3) { points = 20; verdict = "Balanced";     sentiment = "positive"; }
     else if (beta < 1.8) { points = 14; verdict = "Growth risk";  sentiment = "neutral";  }
     else                 { points = 6;  verdict = "High risk";     sentiment = "negative"; }
   } else {
-    if (beta < 0.8)      { points = 10; verdict = "Low beta";    sentiment = "neutral";  }
-    else if (beta < 1.3) { points = 14; verdict = "Moderate";    sentiment = "neutral";  }
-    else if (beta < 2.0) { points = 20; verdict = "High beta";   sentiment = "positive"; }
+    if (beta < 0.8)      { points = 10; verdict = "Low beta";     sentiment = "neutral";  }
+    else if (beta < 1.3) { points = 14; verdict = "Moderate";     sentiment = "neutral";  }
+    else if (beta < 2.0) { points = 20; verdict = "High beta";    sentiment = "positive"; }
     else                 { points = 16; verdict = "Very volatile"; sentiment = "positive"; }
   }
   return { points, maxPoints: 20, verdict, sentiment };
@@ -92,9 +86,7 @@ function scoreProfitability(margin, horizon) {
   else if (margin >= 0)   { points = 3;  verdict = "Break-even";  sentiment = "negative"; }
   else                    { points = 0;  verdict = "Unprofitable"; sentiment = "negative"; }
 
-  // Long-term investors care more about profitability
   if (horizon === "long" && margin > 0.2) points = Math.min(20, points + 2);
-
   return { points, maxPoints: 20, verdict, sentiment };
 }
 
@@ -102,7 +94,6 @@ function computeScore(factors) {
   const total = factors.reduce((s, f) => s + f.points, 0);
   const max   = factors.reduce((s, f) => s + f.maxPoints, 0);
   if (max === 0) return 3;
-  // Map 0..max → 1..5
   return Math.max(1, Math.min(5, Math.round((total / max) * 4 + 1)));
 }
 
@@ -118,6 +109,29 @@ function fmt(val, type) {
   return String(val);
 }
 
+// ─── Yahoo Finance direct fetch (bypasses cloud IP blocks) ───────────────────
+
+const YF_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Referer": "https://finance.yahoo.com/",
+  "Origin": "https://finance.yahoo.com",
+};
+
+async function fetchYahooSummary(ticker) {
+  const modules = "financialData,defaultKeyStatistics,summaryDetail,price";
+  const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}&corsDomain=finance.yahoo.com`;
+
+  const res = await fetch(url, { headers: YF_HEADERS });
+  if (!res.ok) throw new Error(`Yahoo Finance returned ${res.status}`);
+
+  const json = await res.json();
+  const result = json?.quoteSummary?.result?.[0];
+  if (!result) throw new Error("No data returned");
+  return result;
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -127,45 +141,44 @@ export default async function handler(req, res) {
   if (!ticker) return res.status(400).json({ error: "Ticker is required" });
 
   // 1. Fetch Yahoo Finance data ------------------------------------------------
-  let quote, summary;
+  let data;
   try {
-    [quote, summary] = await Promise.all([
-      yahooFinance.quote(ticker),
-      yahooFinance.quoteSummary(ticker, {
-        modules: ["financialData", "defaultKeyStatistics", "summaryDetail"],
-      }),
-    ]);
+    data = await fetchYahooSummary(ticker.toUpperCase());
   } catch (err) {
     return res.status(404).json({
       error: `Could not find data for "${ticker}". Check the ticker symbol and try again.`,
     });
   }
 
-  const fd  = summary?.financialData        || {};
-  const ks  = summary?.defaultKeyStatistics || {};
-  const sd  = summary?.summaryDetail        || {};
+  const fd = data.financialData        || {};
+  const ks = data.defaultKeyStatistics || {};
+  const sd = data.summaryDetail        || {};
+  const pr = data.price                || {};
 
-  const currentPrice  = quote.regularMarketPrice ?? fd.currentPrice?.raw;
-  const pe            = sd.trailingPE?.raw ?? quote.trailingPE;
-  const earningsGrowth = fd.earningsGrowth?.raw;
-  const revenueGrowth  = fd.revenueGrowth?.raw;
-  const margin        = fd.profitMargins?.raw;
-  const beta          = quote.beta ?? sd.beta?.raw;
-  const low52         = quote.fiftyTwoWeekLow  ?? sd.fiftyTwoWeekLow?.raw;
-  const high52        = quote.fiftyTwoWeekHigh ?? sd.fiftyTwoWeekHigh?.raw;
-  const dividendYield = sd.dividendYield?.raw ?? quote.dividendYield;
-  const marketCap     = quote.marketCap;
+  // Extract values — Yahoo Finance wraps numbers in { raw, fmt } objects
+  const r = (obj, key) => obj?.[key]?.raw ?? obj?.[key] ?? null;
+
+  const currentPrice   = r(pr, "regularMarketPrice");
+  const marketCap      = r(pr, "marketCap");
+  const companyName    = pr.longName ?? pr.shortName ?? ticker;
+  const pe             = r(sd, "trailingPE")   ?? r(ks, "trailingEps") ?? null;
+  const earningsGrowth = r(fd, "earningsGrowth");
+  const revenueGrowth  = r(fd, "revenueGrowth");
+  const margin         = r(fd, "profitMargins");
+  const beta           = r(sd, "beta")         ?? r(ks, "beta3Year") ?? null;
+  const low52          = r(sd, "fiftyTwoWeekLow")  ?? r(pr, "fiftyTwoWeekLow");
+  const high52         = r(sd, "fiftyTwoWeekHigh") ?? r(pr, "fiftyTwoWeekHigh");
+  const dividendYield  = r(sd, "dividendYield");
 
   // 2. Compute factor scores ---------------------------------------------------
   const rawFactors = [
-    { name: "Valuation (P/E)",     ...scoreValuation(pe, horizon) },
-    { name: "Growth",              ...scoreGrowth(earningsGrowth, revenueGrowth) },
-    { name: "Price Momentum",      ...scoreMomentum(currentPrice, low52, high52, horizon) },
-    { name: "Risk / Volatility",   ...scoreRisk(beta, risk) },
-    { name: "Profitability",       ...scoreProfitability(margin, horizon) },
+    { name: "Valuation (P/E)",   ...scoreValuation(pe, horizon) },
+    { name: "Growth",            ...scoreGrowth(earningsGrowth, revenueGrowth) },
+    { name: "Price Momentum",    ...scoreMomentum(currentPrice, low52, high52, horizon) },
+    { name: "Risk / Volatility", ...scoreRisk(beta, risk) },
+    { name: "Profitability",     ...scoreProfitability(margin, horizon) },
   ].filter((f) => f.maxPoints > 0);
 
-  // Bonus: dividend yield for long-term income seekers
   if (horizon === "long" && risk === "low" && dividendYield && dividendYield > 0.02) {
     rawFactors.push({
       name: "Dividend Yield",
@@ -178,10 +191,10 @@ export default async function handler(req, res) {
 
   const score = computeScore(rawFactors);
 
-  // 3. Build a summary for the AI -----------------------------------------------
+  // 3. Build context for AI explanation ----------------------------------------
   const dataContext = [
     `Ticker: ${ticker}`,
-    `Company: ${quote.longName ?? quote.shortName ?? ticker}`,
+    `Company: ${companyName}`,
     `Current price: ${fmt(currentPrice, "price")}`,
     `52-week range: ${fmt(low52, "price")} – ${fmt(high52, "price")}`,
     `Market cap: ${fmt(marketCap, "bn")}`,
@@ -229,30 +242,30 @@ export default async function handler(req, res) {
 
   // 5. Build metrics rows for display ------------------------------------------
   const metrics = [
-    { label: "Current Price",      value: fmt(currentPrice, "price") },
-    { label: "52-Week Low",        value: fmt(low52, "price") },
-    { label: "52-Week High",       value: fmt(high52, "price") },
-    { label: "Market Cap",         value: fmt(marketCap, "bn") },
-    { label: "Trailing P/E",       value: pe != null ? pe.toFixed(2) : null,
+    { label: "Current Price",   value: fmt(currentPrice, "price") },
+    { label: "52-Week Low",     value: fmt(low52, "price") },
+    { label: "52-Week High",    value: fmt(high52, "price") },
+    { label: "Market Cap",      value: fmt(marketCap, "bn") },
+    { label: "Trailing P/E",    value: pe != null ? pe.toFixed(2) : null,
       note: pe != null ? (pe < 15 ? "cheap" : pe > 35 ? "expensive" : "fair") : null,
       good: pe != null ? (pe < 15 ? true : pe > 35 ? false : null) : null },
-    { label: "Earnings Growth",    value: fmt(earningsGrowth, "pct"),
+    { label: "Earnings Growth", value: fmt(earningsGrowth, "pct"),
       note: earningsGrowth != null ? (earningsGrowth > 0.1 ? "strong" : earningsGrowth < 0 ? "declining" : "slow") : null,
       good: earningsGrowth != null ? earningsGrowth > 0.1 : null },
-    { label: "Revenue Growth",     value: fmt(revenueGrowth, "pct"),
+    { label: "Revenue Growth",  value: fmt(revenueGrowth, "pct"),
       note: revenueGrowth != null ? (revenueGrowth > 0.1 ? "strong" : revenueGrowth < 0 ? "declining" : "slow") : null,
       good: revenueGrowth != null ? revenueGrowth > 0.1 : null },
-    { label: "Profit Margin",      value: fmt(margin, "pct"),
+    { label: "Profit Margin",   value: fmt(margin, "pct"),
       note: margin != null ? (margin > 0.2 ? "healthy" : margin < 0 ? "negative" : "thin") : null,
       good: margin != null ? margin > 0.1 : null },
-    { label: "Beta",               value: beta != null ? beta.toFixed(2) : null },
-    { label: "Dividend Yield",     value: fmt(dividendYield, "pct") },
+    { label: "Beta",            value: beta != null ? beta.toFixed(2) : null },
+    { label: "Dividend Yield",  value: fmt(dividendYield, "pct") },
   ].filter((m) => m.value != null);
 
   // 6. Return ------------------------------------------------------------------
   return res.status(200).json({
     ticker,
-    name:  quote.longName ?? quote.shortName ?? ticker,
+    name: companyName,
     score,
     currentPrice,
     factors: rawFactors,
