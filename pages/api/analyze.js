@@ -99,24 +99,34 @@ function fmt(val, type) {
 
 // ─── Financial Modeling Prep (FMP) data fetch ────────────────────────────────
 
+function fmpCheck(data) {
+  // FMP returns error objects instead of arrays when rate-limited or key is invalid
+  if (!Array.isArray(data)) {
+    const msg = data?.["Error Message"] ?? data?.message ?? "";
+    if (/limit/i.test(msg) || /upgrade/i.test(msg)) throw new Error("RATE_LIMIT");
+    throw new Error("NOT_FOUND");
+  }
+}
+
 async function fetchStockData(ticker, apiKey) {
   const base = "https://financialmodelingprep.com/api/v3";
 
-  // 3 parallel calls: quote + profile + income statement (last 2 years)
-  const [quoteRes, profileRes, incomeRes] = await Promise.all([
-    fetch(`${base}/quote/${ticker}?apikey=${apiKey}`),
-    fetch(`${base}/profile/${ticker}?apikey=${apiKey}`),
-    fetch(`${base}/income-statement/${ticker}?limit=2&period=annual&apikey=${apiKey}`),
-  ]);
+  // Sequential calls to respect FMP free tier rate limits
+  const quoteRes   = await fetch(`${base}/quote/${ticker}?apikey=${apiKey}`);
+  const quoteArr   = await quoteRes.json();
+  fmpCheck(quoteArr);
 
-  const [quoteArr, profileArr, incomeArr] = await Promise.all([
-    quoteRes.json(),
-    profileRes.json(),
-    incomeRes.ok ? incomeRes.json() : Promise.resolve([]),
-  ]);
+  const profileRes = await fetch(`${base}/profile/${ticker}?apikey=${apiKey}`);
+  const profileArr = await profileRes.json();
+  fmpCheck(profileArr);
 
-  const q = Array.isArray(quoteArr)   ? quoteArr[0]   : null;
-  const p = Array.isArray(profileArr) ? profileArr[0] : null;
+  const incomeRes  = await fetch(`${base}/income-statement/${ticker}?limit=2&period=annual&apikey=${apiKey}`);
+  const incomeRaw  = incomeRes.ok ? await incomeRes.json() : [];
+  if (!Array.isArray(incomeRaw)) fmpCheck(incomeRaw); // catch rate limit errors
+  const incomeArr  = Array.isArray(incomeRaw) ? incomeRaw : [];
+
+  const q = quoteArr[0]   ?? null;
+  const p = profileArr[0] ?? null;
 
   // Not found
   if (!q || !q.price) throw new Error("NOT_FOUND");
@@ -188,6 +198,11 @@ export default async function handler(req, res) {
   try {
     stock = await fetchStockData(ticker.toUpperCase(), fmpKey);
   } catch (err) {
+    if (err.message === "RATE_LIMIT") {
+      return res.status(429).json({
+        error: "FMP rate limit reached. Wait a minute and try again — the free tier allows 250 requests/day.",
+      });
+    }
     return res.status(404).json({
       error: `Could not find data for "${ticker}". Check the ticker symbol and try again.`,
     });
